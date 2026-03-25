@@ -1,583 +1,658 @@
 ---
 name: predictnow-trading-agent
-description: "Complete guide for building and deploying AI trading bots on the PredictNow BTC prediction market. Covers: account setup, Zoro Canton wallet creation, writing trading strategies, deploying agents to Railway, and managing real CBTC trading. Use when: setting up a trading bot, creating a prediction market agent, deploying to PredictNow, writing a trading strategy, connecting to the Canton network for trading."
+description: "Complete guide for building AI trading bots on the PredictNow BTC prediction market. Language-agnostic, wallet-agnostic, framework-agnostic. Covers: PredictNow API, Firebase auth, writing strategies, deploying agents, funding with CBTC. Use when: setting up a trading bot, creating a prediction market agent, deploying to PredictNow, writing a trading strategy, connecting to Canton for trading, agentic trading."
 ---
 
-# PredictNow AI Trading Agent — Complete Setup Guide
+# PredictNow AI Trading Agent — Build Guide
 
-Build and deploy autonomous AI trading bots on the PredictNow BTC prediction market. Agents place bets on whether BTC price goes UP or DOWN in 1-minute rounds, competing against each other with real CBTC on the Canton blockchain.
+Build autonomous trading bots on the PredictNow BTC prediction market. Bet UP or DOWN on BTC price each round. Compete against other agents with real CBTC on the Canton blockchain.
+
+**This guide is:**
+- **Language-agnostic** — use TypeScript, Python, Go, Rust, or any language with HTTP + Ed25519
+- **Wallet-agnostic** — use Zoro, any Canton SDK, or skip wallets entirely for testing
+- **Framework-agnostic** — no required agent framework; just call the API
 
 ---
 
-## Quick Overview
+## How It Works
 
-**What you're building:** An autonomous agent that:
-1. Signs into PredictNow with its own account
-2. Polls BTC price and market status every 30 seconds
-3. Decides UP or DOWN using a strategy you define
-4. Places minimum bets (0.00001 CBTC = 1000 satoshis)
-5. Tracks its own performance (win rate, P&L, streaks)
-6. Runs 24/7 on Railway (no local machine needed)
-
-**Architecture:**
 ```
-[Your Agent on Railway]
-    |
-    |-- Firebase Auth (email/password → ID token)
-    |-- PredictNow API (predict, balance, market status)
-    |-- Canton Wallet API (wallet ops, CBTC transfers)
-    |        |
-    |        |-- Option A: Zoro API (dev-api.zorowallet.com)
-    |        |-- Option B: Any Canton-compatible wallet SDK
-    |        |-- Option C: Skip wallet ops (use admin credit for testing)
-    |
-[PredictNow Market Server]
-    |-- 1-minute rounds (preview) / 15-minute rounds (production)
-    |-- BTC price oracle (Binance)
-    |-- Settlement + payouts
-    |-- Pool wallets (retail / institutional escrow)
+1. Agent signs into PredictNow (Firebase email/password → ID token)
+2. Agent polls market status every N seconds
+3. When a round is active, agent decides UP or DOWN
+4. Agent places a bet via POST /api/predict
+5. Round settles → winners split the losers' pool (minus fee)
+6. Repeat
 ```
 
-**Wallet-agnostic design:** The core agent (Firebase auth + PredictNow API + strategy) works independently of which Canton wallet provider you use. Wallet operations (creating wallets, signing transactions, transferring CBTC) are a separate layer. You can:
-- Use **Zoro API** if you have access (documented below)
-- Use **any Canton SDK** that supports Ed25519 signing + the standard Canton transaction model
-- **Skip wallet ops entirely** for testing — use the admin credit endpoint to fund agent balances manually
+**Payout formula:**
+```
+winnerShare = myBet / totalWinningPool
+loserPoolAfterFee = totalLosingPool * (1 - fee%)
+payout = myBet + (loserPoolAfterFee * winnerShare)
+```
+If everyone bet the same direction → bets refunded (no losers).
 
 ---
 
-## Step 1: Prerequisites
+## Part 1: PredictNow API
 
-You need:
-- **Node.js 20+** and **npm**
-- **Railway account** (hobby plan, $5/month) — https://railway.app
-- **PredictNow invite code** (get from the team)
-- **Zoro API key** (for Canton wallet operations)
+This is the only thing your agent MUST interact with. Everything else is optional.
 
-Install the Railway CLI:
+### Base URL
+
+Get the current market URL from the team. Examples:
+- Preview: `https://predict-now-preview-production.up.railway.app`
+- Production: ask the team
+
+### 1.1 Public Endpoints (no auth needed)
+
+**GET /api/btc-price**
+```json
+// Response:
+{ "price": 71250.50, "change_24h": 0.48, "last_updated": 1774431677513 }
+```
+Note: field may be `change_24h` or `change24h` depending on server version. Handle both.
+
+**GET /api/market/status**
+```json
+// Active round:
+{
+  "status": "active",
+  "round_number": 2756,
+  "open_price": 71227.55,
+  "window_start_ms": 1774431509439,
+  "window_end_ms": 1774431569439,
+  "time_remaining_ms": 24527,
+  "up_predictions": 2,
+  "down_predictions": 1,
+  "up_amount": 0.00002,
+  "down_amount": 0.00001,
+  "fee_percentage": 1
+}
+
+// Between rounds:
+{ "status": "no_active_round", "next_round": 2757, "next_start_time": 1774431600000 }
+```
+
+**GET /api/results/history?limit=20**
+```json
+{
+  "rounds": [
+    {
+      "round_number": 2755,
+      "open_price": 71200.00,
+      "close_price": 71250.50,
+      "winning_direction": "UP",
+      "total_up_amount": 0.00003,
+      "total_down_amount": 0.00001,
+      "fee_collected": 0.0000001,
+      "window_start_time": 1774431400000,
+      "window_end_time": 1774431460000
+    }
+  ],
+  "total": 2755
+}
+```
+
+**GET /api/results/:roundNumber** — single round detail
+
+**GET /api/pool-info** — pool wallet address + fee percentage
+
+**GET /api/firebase-config** — public Firebase web config (apiKey, authDomain, projectId)
+
+### 1.2 Authenticated Endpoints
+
+All require header: `Authorization: Bearer <FIREBASE_ID_TOKEN>`
+
+**POST /api/auth/verify** — register or verify account
+```json
+// Request (new user):
+{ "invite_code": "INST-ALPHA" }
+
+// Response:
+{ "uid": "abc123", "email": "agent@example.com", "tier": "institutional", "pool_wallet_id": "inst-1" }
+```
+Invite codes determine which pool your bets settle against:
+- Retail codes → retail pool
+- Institutional codes (INST-ALPHA, INST-BRAVO, INST-CHARLIE) → institutional pools
+- Existing users skip invite code validation
+
+**POST /api/auth/link-party** — link a Canton wallet
+```json
+// Request:
+{ "party_id": "abc123def::1220..." }
+// Canton format: contains "::", 20-300 chars
+```
+Each wallet can only be linked to one account.
+
+**POST /api/auth/set-active-wallet** — switch active wallet
+```json
+{ "party_id": "abc123def::1220..." }
+```
+
+**POST /api/predict** — place a bet
+```json
+// Request:
+{ "direction": "UP", "amount": 0.00001 }
+
+// Response:
+{
+  "prediction_id": 42,
+  "market_round": 2756,
+  "direction": "UP",
+  "amount": 0.00001,
+  "party_id": "abc123def::1220...",
+  "remaining_balance": 0.00005
+}
+```
+
+**GET /api/balance** — your internal CBTC balance
+```json
+{
+  "balance": 0.00006,
+  "total_deposited": 0.0001,
+  "total_withdrawn": 0,
+  "total_won": 0.00002,
+  "total_lost": 0.00004
+}
+```
+
+**GET /api/bets** — your bet history
+```json
+[
+  { "round_number": 2755, "direction": "UP", "amount": 0.00001, "status": "won", "settled": true },
+  { "round_number": 2754, "direction": "DOWN", "amount": 0.00001, "status": "lost", "settled": true }
+]
+```
+
+**POST /api/deposit** — trigger deposit detection (scans Canton for incoming CBTC)
+
+**POST /api/withdraw** — withdraw CBTC to your Canton wallet
+```json
+{ "amount": 0.00005 }
+```
+
+### 1.3 Admin Endpoints
+
+Require header: `X-Admin-Secret: <ADMIN_SECRET>`
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/admin/user?email=...` | GET | View user account data |
+| `/admin/credit` | POST | Credit balance: `{ email, amount, reason }` |
+| `/admin/delete-user` | POST | Delete user: `{ email }` |
+| `/admin/invite-codes` | POST | Generate invite codes: `{ tier, count }` |
+| `/admin/invite-codes` | GET | List invite codes |
+| `/admin/db-summary` | GET | Database overview |
+| `/admin/retry-payout` | POST | Retry failed payout |
+| `/admin/approve-withdrawal` | POST | Override anti-fraud block |
+
+### 1.4 Constraints
+
+| Constraint | Value |
+|------------|-------|
+| Min bet | 0.00001 CBTC (1000 satoshis) |
+| Max bet | 21,000,000 CBTC |
+| Rate limit | 5 predictions per user per round |
+| Rate limit cooldown | 15 minutes |
+| Fee | Configurable (1-10% of losing pool) |
+| Party ID format | Contains `::`, 20-300 chars |
+| Withdrawal anti-fraud | Blocked if withdrawn > deposited |
+
+---
+
+## Part 2: Authentication
+
+Your agent needs a Firebase account. This works from any language.
+
+### 2.1 Create Account
+
+```
+POST https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=<FIREBASE_WEB_API_KEY>
+Content-Type: application/json
+
+{ "email": "my-agent@example.com", "password": "SecurePass123!", "returnSecureToken": true }
+
+→ { "idToken": "eyJ...", "localId": "uid123", "refreshToken": "AEu4..." }
+```
+
+Get `FIREBASE_WEB_API_KEY` from `GET /api/firebase-config` on the market server.
+
+### 2.2 Sign In (returning user)
+
+```
+POST https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=<KEY>
+Content-Type: application/json
+
+{ "email": "my-agent@example.com", "password": "SecurePass123!", "returnSecureToken": true }
+
+→ { "idToken": "eyJ...", "refreshToken": "AEu4...", "expiresIn": "3600" }
+```
+
+### 2.3 Refresh Token (before expiry)
+
+Tokens expire after 1 hour. Refresh before they expire:
+
+```
+POST https://securetoken.googleapis.com/v1/token?key=<KEY>
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=refresh_token&refresh_token=<REFRESH_TOKEN>
+
+→ { "id_token": "eyJ...", "refresh_token": "AEu4...", "expires_in": "3600" }
+```
+
+### 2.4 Use Token
+
+All authenticated PredictNow API calls:
+```
+Authorization: Bearer <ID_TOKEN>
+```
+
+---
+
+## Part 3: Account Setup
+
+One-time setup per agent:
+
 ```bash
-npm install -g @railway/cli
-railway login
+# 1. Get Firebase config
+curl <MARKET_URL>/api/firebase-config
+# → { "apiKey": "AIza...", "authDomain": "...", "projectId": "..." }
+
+# 2. Create Firebase account
+curl -X POST "https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=<API_KEY>" \
+  -H "Content-Type: application/json" \
+  -d '{"email":"my-agent@example.com","password":"SecurePass123!","returnSecureToken":true}'
+# → save idToken
+
+# 3. Verify with invite code
+curl -X POST "<MARKET_URL>/api/auth/verify" \
+  -H "Authorization: Bearer <ID_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"invite_code":"<CODE>"}'
+
+# 4. Link Canton wallet (if you have one)
+curl -X POST "<MARKET_URL>/api/auth/link-party" \
+  -H "Authorization: Bearer <ID_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"party_id":"<CANTON_PARTY_ID>"}'
+
+# 5. Fund balance (ask admin or deposit CBTC)
+curl -X POST "<MARKET_URL>/admin/credit" \
+  -H "X-Admin-Secret: <SECRET>" \
+  -H "Content-Type: application/json" \
+  -d '{"email":"my-agent@example.com","amount":0.0001,"reason":"initial funding"}'
 ```
 
 ---
 
-## Step 2: Create a Canton Wallet
+## Part 4: The Minimal Agent
 
-Each agent needs its own Canton wallet (a party ID on the Canton network). You have several options:
+The smallest possible trading agent. Works in any language.
 
-### Option A: Use Zoro API (recommended if you have access)
+### Pseudocode
 
-> For complete Zoro API docs, credentials, and gotchas, read the skill at `~/.claude/skills/zoro-wallet-api/SKILL.md`
+```
+token = firebase_sign_in(email, password)
+last_bet_round = 0
 
-### Option B: Use any Canton-compatible wallet SDK
-Any SDK that can:
-1. Generate Ed25519 key pairs
-2. Onboard a party to the Canton network
-3. Sign transactions (prepare → sign hash → broadcast)
-4. Send/receive CBTC and CC (Amulet) tokens
+loop forever:
+  if token_expired(): token = refresh_token()
 
-The Canton transaction model is the same regardless of provider:
-- `POST .../prepare/<action>` → returns `{ commandId, command: { preparedTransactionHash } }`
-- Sign `preparedTransactionHash` with Ed25519 private key
-- `POST .../broadcast` → returns `{ transactionId }`
+  status = GET /api/market/status
+  if status.status != "active": sleep(10); continue
+  if status.round_number == last_bet_round: sleep(10); continue
 
-### Option C: Skip wallet ops (testing only)
-For quick testing, skip wallet creation entirely. Use the admin credit endpoint to fund agent balances directly. You still need a Canton party ID (ask the team for a pre-created one), but no wallet signing is needed.
+  direction = my_strategy(status)
 
-### 2a. Generate Ed25519 keys (all providers)
+  response = POST /api/predict { direction, amount: 0.00001 }
+    with Authorization: Bearer <token>
 
+  last_bet_round = status.round_number  # even on failure — avoid rate limit burn
+  sleep(30)
+```
+
+### TypeScript Example
+
+```typescript
+const MARKET = process.env.MARKET_URL!;
+const FIREBASE_KEY = process.env.FIREBASE_API_KEY!;
+const EMAIL = process.env.AGENT_EMAIL!;
+const PASSWORD = process.env.AGENT_PASSWORD!;
+
+let token = "";
+let refreshToken = "";
+let tokenExpiry = 0;
+let lastRound = 0;
+
+async function auth() {
+  const endpoint = refreshToken
+    ? `https://securetoken.googleapis.com/v1/token?key=${FIREBASE_KEY}`
+    : `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${FIREBASE_KEY}`;
+  const body = refreshToken
+    ? `grant_type=refresh_token&refresh_token=${refreshToken}`
+    : JSON.stringify({ email: EMAIL, password: PASSWORD, returnSecureToken: true });
+  const headers: Record<string, string> = refreshToken
+    ? { "Content-Type": "application/x-www-form-urlencoded" }
+    : { "Content-Type": "application/json" };
+
+  const res = await fetch(endpoint, { method: "POST", headers, body });
+  const data = await res.json() as any;
+  token = data.idToken || data.id_token;
+  refreshToken = data.refreshToken || data.refresh_token;
+  tokenExpiry = Date.now() + parseInt(data.expiresIn || data.expires_in || "3600") * 1000;
+}
+
+async function tick() {
+  if (Date.now() > tokenExpiry - 60000) await auth();
+
+  const status = await fetch(`${MARKET}/api/market/status`).then(r => r.json()) as any;
+  if (status.status !== "active" || status.round_number === lastRound) return;
+
+  // YOUR STRATEGY HERE
+  const direction = Math.random() < 0.5 ? "UP" : "DOWN";
+
+  try {
+    const res = await fetch(`${MARKET}/api/predict`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ direction, amount: 0.00001 }),
+    });
+    const data = await res.json() as any;
+    console.log(`Round ${status.round_number}: ${direction} → ${res.ok ? "OK" : data.error}`);
+  } catch (e) {
+    console.error("Bet failed:", e);
+  }
+  lastRound = status.round_number;
+}
+
+await auth();
+while (true) { await tick(); await new Promise(r => setTimeout(r, 30000)); }
+```
+
+### Python Example
+
+```python
+import requests, time, os, random
+
+MARKET = os.environ["MARKET_URL"]
+FIREBASE_KEY = os.environ["FIREBASE_API_KEY"]
+EMAIL = os.environ["AGENT_EMAIL"]
+PASSWORD = os.environ["AGENT_PASSWORD"]
+
+token = refresh_token = ""
+token_expiry = 0
+last_round = 0
+
+def auth():
+    global token, refresh_token, token_expiry
+    if refresh_token:
+        r = requests.post(f"https://securetoken.googleapis.com/v1/token?key={FIREBASE_KEY}",
+            data=f"grant_type=refresh_token&refresh_token={refresh_token}",
+            headers={"Content-Type": "application/x-www-form-urlencoded"})
+        d = r.json()
+        token, refresh_token = d["id_token"], d["refresh_token"]
+    else:
+        r = requests.post(f"https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key={FIREBASE_KEY}",
+            json={"email": EMAIL, "password": PASSWORD, "returnSecureToken": True})
+        d = r.json()
+        token, refresh_token = d["idToken"], d["refreshToken"]
+    token_expiry = time.time() + int(d.get("expiresIn", d.get("expires_in", 3600)))
+
+def tick():
+    global last_round
+    if time.time() > token_expiry - 60: auth()
+
+    status = requests.get(f"{MARKET}/api/market/status").json()
+    if status["status"] != "active" or status.get("round_number") == last_round: return
+
+    direction = random.choice(["UP", "DOWN"])  # YOUR STRATEGY HERE
+
+    r = requests.post(f"{MARKET}/api/predict",
+        json={"direction": direction, "amount": 0.00001},
+        headers={"Authorization": f"Bearer {token}"})
+    print(f"Round {status['round_number']}: {direction} → {'OK' if r.ok else r.json().get('error')}")
+    last_round = status.get("round_number", last_round)
+
+auth()
+while True:
+    try: tick()
+    except Exception as e: print(f"Error: {e}")
+    time.sleep(30)
+```
+
+---
+
+## Part 5: Writing Strategies
+
+A strategy takes market data and returns a direction. How complex you make it is up to you.
+
+### Data Available to Your Strategy
+
+From `GET /api/market/status`:
+- `up_amount`, `down_amount` — how much is bet on each side THIS round
+- `round_number` — which round we're in
+- `time_remaining_ms` — time left to bet
+
+From `GET /api/btc-price`:
+- `price` — current BTC price
+- `change_24h` — 24h price change %
+
+From `GET /api/results/history`:
+- Last N rounds — `winning_direction`, `open_price`, `close_price`, pool sizes
+
+From `GET /api/bets`:
+- Your past bets — direction, amount, won/lost
+
+### Example Strategies
+
+**Coin Flip** (baseline — 50/50 random):
+```
+direction = random(UP, DOWN)
+```
+
+**Contrarian** (bet against the crowd):
+```
+if up_amount > down_amount → bet DOWN
+if down_amount > up_amount → bet UP
+else → default DOWN
+```
+Logic: when the crowd piles on one side, the payout ratio for the other side is better.
+
+**Tit-for-Tat** (mirror what worked):
+```
+if my_last_bet won → repeat same direction
+if my_last_bet lost → switch direction
+if no history → follow price trend
+```
+
+**Mean Reversion** (bet against streaks):
+```
+if last 3 rounds all UP → bet DOWN
+if last 3 rounds all DOWN → bet UP
+else → follow price trend
+```
+
+**Momentum** (ride the trend):
+```
+if last 3 rounds all UP → bet UP (trend continues)
+if last 3 rounds all DOWN → bet DOWN
+else → follow 24h price change
+```
+
+### Strategy Tips
+- Start with minimum bets (0.00001 CBTC) until your strategy proves profitable
+- Track your win rate — if below 50%, the strategy is losing money to fees
+- The contrarian strategy works best when other agents herd on one side
+- History is your friend — `GET /api/results/history?limit=50` gives you patterns
+
+---
+
+## Part 6: Canton Wallet (Optional)
+
+You only need a Canton wallet if you want to:
+- Deposit real CBTC on-chain
+- Withdraw winnings to your wallet
+- Trade with real blockchain settlement
+
+**For testing, skip this entirely** — use the admin credit endpoint to fund balances.
+
+### What you need from ANY Canton wallet provider:
+
+1. **A party ID** — string format `prefix::hash` (20-300 chars)
+2. **Ed25519 key pair** — for signing transactions
+3. **Transfer pre-approval** — so incoming CBTC auto-accepts
+4. **CC (Amulet) balance** — for gas fees (~3 CC per CBTC transfer)
+
+### Canton Transaction Model (universal)
+
+All Canton providers follow prepare → sign → broadcast:
+
+```
+1. POST /prepare/<action>
+   → { commandId, command: { preparedTransactionHash } }
+
+2. Ed25519-sign the preparedTransactionHash with your private key
+   → base64 signature
+
+3. POST /broadcast
+   { signature, publicKey, preparedTransaction: { commandId, command }, partyId }
+   → { status, transactionId }
+```
+
+### Ed25519 Signing (any language)
+
+**TypeScript** (`@noble/ed25519`):
 ```typescript
 import * as ed from "@noble/ed25519";
 import { sha512 } from "@noble/hashes/sha512";
 ed.etc.sha512Sync = sha512;
 
-const privateKeyBytes = ed.utils.randomPrivateKey();
-const publicKeyBytes = ed.getPublicKey(privateKeyBytes);
-const privateKey = Buffer.from(privateKeyBytes).toString("base64");
-const publicKey = Buffer.from(publicKeyBytes).toString("base64");
-```
-
-Dependencies: `@noble/ed25519@^2.2.0`, `@noble/hashes@^1.7.0`
-
-### 2b. Onboard the party (Zoro example — adapt for your provider)
-
-```bash
-# Step 1: Prepare
-curl -X POST "<ZORO_BASE_URL>/canton/transaction/prepare/external-party" \
-  -H "Authorization: Bearer <ZORO_API_KEY>" \
-  -H "Content-Type: application/json" \
-  -d '{"publicKey": "<BASE64_PUBLIC_KEY>"}'
-# Returns: { partyId, topologyTransactions, multiHash, publicKeyFingerprint }
-
-# Step 2: Sign the multiHash (NOT preparedTransactionHash) with Ed25519
-# Step 3: Broadcast
-curl -X POST "<ZORO_BASE_URL>/canton/transaction/broadcast/external-party" \
-  -H "Authorization: Bearer <ZORO_API_KEY>" \
-  -H "Content-Type: application/json" \
-  -d '{"signature": "<BASE64_SIG>", "preparedParty": { "partyId": "...", "topologyTransactions": [...], "multiHash": "...", "publicKeyFingerprint": "..." }}'
-```
-
-### 2c. Set up the wallet for receiving (Zoro example)
-
-After onboarding, the wallet needs merge delegation and transfer pre-approvals:
-
-```bash
-# Merge delegation (required for UTXO management)
-POST /canton/transaction/prepare/merge-delegation-proposal
-Body: { "partyId": "<AGENT_PARTY_ID>" }
-# → sign preparedTransactionHash → broadcast
-
-# CC (Amulet) pre-approval (auto-accept CC transfers)
-POST /canton/transaction/prepare/transfer-preapproval
-Body: { "partyId": "<AGENT_PARTY_ID>", "instrument": { "id": "Amulet", "admin": "<CC_ADMIN>" } }
-# → sign → broadcast
-
-# CBTC pre-approval (auto-accept CBTC transfers)
-POST /canton/transaction/prepare/transfer-preapproval
-Body: { "partyId": "<AGENT_PARTY_ID>", "instrument": { "id": "CBTC", "admin": "<CBTC_ADMIN>" } }
-# → sign → broadcast
-```
-
-Wait 3 seconds between each transaction (0.5 TPS rate limit).
-
-### 2d. Fund with CC (gas) — required regardless of provider
-
-The wallet needs CC (Canton Coin / Amulet) to pay transaction fees. CBTC transfers cost ~3.02 CC each in gas. Send at least 10 CC from a funded wallet.
-
-**CRITICAL:** Use full ISO timestamp for expiry (not date-only). Date-only format causes "lock expires before amulet" errors.
-```typescript
-const expiryDate = new Date(Date.now() + 4 * 60 * 60 * 1000).toISOString();
-// Good: "2026-03-25T10:55:09.091Z"
-// Bad:  "2026-03-26" ← causes lock timing errors
-```
-
----
-
-## Step 3: Create a PredictNow Account
-
-Each agent needs its own Firebase account linked to its Canton wallet.
-
-### 3a. Create Firebase account
-
-```bash
-curl -X POST "https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=<FIREBASE_WEB_API_KEY>" \
-  -H "Content-Type: application/json" \
-  -d '{"email":"my-agent@example.com","password":"SecurePassword123!","returnSecureToken":true}'
-# Returns: { idToken, localId (uid), refreshToken }
-```
-
-### 3b. Verify with invite code
-
-```bash
-curl -X POST "<MARKET_URL>/api/auth/verify" \
-  -H "Authorization: Bearer <ID_TOKEN>" \
-  -H "Content-Type: application/json" \
-  -d '{"invite_code":"<INVITE_CODE>"}'
-# Returns: { uid, email, tier, pool_wallet_id }
-```
-
-**Invite code tiers:**
-- `retail` — trades against the retail pool
-- `institutional` — trades against an institutional pool (e.g., `INST-ALPHA`)
-- Master codes (unlimited uses) are available from the team
-
-### 3c. Link Canton wallet
-
-```bash
-curl -X POST "<MARKET_URL>/api/auth/link-party" \
-  -H "Authorization: Bearer <ID_TOKEN>" \
-  -H "Content-Type: application/json" \
-  -d '{"party_id":"<AGENT_CANTON_PARTY_ID>"}'
-```
-
-Each Canton wallet can only be linked to one account. To re-link, the old account must be deleted first (admin endpoint).
-
----
-
-## Step 4: Write a Trading Strategy
-
-A strategy is a single function. It receives market context and returns a bet decision (or null to skip).
-
-### The Strategy Interface
-
-```typescript
-type Strategy = (ctx: TradeContext) => TradeDecision | null;
-
-interface TradeContext {
-  price: { price: number; change24h: number };           // current BTC price
-  round: { status: string; round_number: number;          // current round
-            total_up_amount: number; total_down_amount: number;
-            time_remaining_ms: number };
-  history: RoundResult[];    // last N settled rounds (winning_direction, prices, volumes)
-  myBets: MyBetOutcome[];    // my past bets with outcomes (won, pnl)
-  balance: number;           // my current CBTC balance
-  stats: AgentStats;         // my win rate, streak, total PnL
-  config: Record<string, number>;  // tunable parameters
-}
-
-interface TradeDecision {
-  direction: "UP" | "DOWN";
-  amount: number;            // minimum: 0.00001 CBTC
-  reason?: string;           // logged for debugging
+function signHash(hashBase64: string, privateKeyBase64: string): string {
+  const hash = Buffer.from(hashBase64, "base64");
+  const key = Buffer.from(privateKeyBase64, "base64");
+  return Buffer.from(ed.sign(hash, key)).toString("base64");
 }
 ```
 
-### Example: Coin Flip (baseline)
+**Python** (`pynacl`):
+```python
+import nacl.signing, base64
 
-```typescript
-const coinFlip: Strategy = (ctx) => {
-  const MIN_BET = 0.00001;
-  if (MIN_BET > ctx.balance) return null;
-  return {
-    direction: Math.random() < 0.5 ? "UP" : "DOWN",
-    amount: MIN_BET,
-    reason: "coin-flip",
-  };
-};
+def sign_hash(hash_b64: str, private_key_b64: str) -> str:
+    key = nacl.signing.SigningKey(base64.b64decode(private_key_b64))
+    signed = key.sign(base64.b64decode(hash_b64))
+    return base64.b64encode(signed.signature).decode()
 ```
 
-### Example: Contrarian (bet against the crowd)
+### Wallet Setup Checklist (if using wallets)
 
-```typescript
-const contrarian: Strategy = (ctx) => {
-  const MIN_BET = 0.00001;
-  if (MIN_BET > ctx.balance) return null;
+1. Generate Ed25519 key pair
+2. Onboard party via your Canton provider
+3. Set up merge delegation (UTXO management)
+4. Enable transfer pre-approval for CC (Amulet) instrument
+5. Enable transfer pre-approval for CBTC instrument
+6. Fund with CC gas (at least 10 CC)
+7. Link party ID to your PredictNow account via `POST /api/auth/link-party`
 
-  const up = ctx.round.total_up_amount ?? 0;
-  const down = ctx.round.total_down_amount ?? 0;
+### Deposit Flow
 
-  let direction: "UP" | "DOWN";
-  if (up > down) direction = "DOWN";        // majority UP → bet DOWN
-  else if (down > up) direction = "UP";     // majority DOWN → bet UP
-  else direction = "DOWN";                   // empty/tied → default DOWN
-
-  return { direction, amount: MIN_BET, reason: "contrarian" };
-};
+```
+You send CBTC to your agent's Canton wallet
+  → auto-accepted (if pre-approval enabled)
+  → agent calls POST /api/deposit (authenticated)
+  → market server detects incoming CBTC, credits internal balance
+  → agent can now bet with that CBTC
 ```
 
-### Example: Game Theory (Tit-for-Tat + Mean Reversion)
-
-```typescript
-const gameTheory: Strategy = (ctx) => {
-  const MIN_BET = 0.00001;
-  if (MIN_BET > ctx.balance) return null;
-
-  // Mean reversion: 3+ rounds same direction → bet opposite
-  if (ctx.history.length >= 3) {
-    const last3 = ctx.history.slice(0, 3).map(r => r.winning_direction);
-    if (last3.every(d => d === "UP")) return { direction: "DOWN", amount: MIN_BET, reason: "mean-reversion" };
-    if (last3.every(d => d === "DOWN")) return { direction: "UP", amount: MIN_BET, reason: "mean-reversion" };
-  }
-
-  // Tit-for-tat: repeat what worked, switch what didn't
-  if (ctx.myBets.length > 0) {
-    const last = ctx.myBets[0];
-    const direction = last.won ? last.direction : (last.direction === "UP" ? "DOWN" : "UP");
-    return { direction, amount: MIN_BET, reason: "tit-for-tat" };
-  }
-
-  // Opening move: follow price trend
-  return {
-    direction: (ctx.price?.change24h ?? 0) >= 0 ? "UP" : "DOWN",
-    amount: MIN_BET,
-    reason: "opening-move",
-  };
-};
-```
-
-### Strategy Tips
-- `ctx.history` is sorted newest-first (index 0 = most recent settled round)
-- `ctx.myBets` is also newest-first, includes `won` and `pnl` fields
-- `ctx.stats.currentStreak` is positive for win streaks, negative for losses
-- Return `null` to skip a round (counted in `stats.totalSkipped`)
-- The `reason` field is logged — use it for debugging
-- `ctx.round.total_up_amount` / `total_down_amount` show current round's pool — useful for contrarian strategies
+### Gotchas
+- CBTC transfers cost ~3.02 CC in gas (from your CC balance, not CBTC)
+- Use full ISO timestamp for expiry: `new Date(Date.now() + 4*3600000).toISOString()`
+- Date-only format (`2026-03-26`) causes "lock expires before amulet" errors
+- Fresh wallets need CC before they can accept any transfers
+- Transfer pre-approval only auto-accepts NEW transfers (not already-pending ones)
+- Wait 3s between Canton transactions (0.5 TPS rate limit)
 
 ---
 
-## Step 5: Set Up the Agent Project
+## Part 7: Deployment
 
-### 5a. Project structure
+Your agent needs to run 24/7. Options:
 
-```
-my-agent/
-  package.json
-  tsconfig.json
-  src/
-    cli.ts              # Entry point
-    agent.ts            # Agent class (tick loop)
-    factory.ts          # Creates and manages agents
-    market-client.ts    # HTTP client with Firebase auth
-    strategies/
-      my-strategy.ts    # Your custom strategy
-```
-
-### 5b. package.json
-
-```json
-{
-  "name": "my-predictnow-agent",
-  "version": "0.1.0",
-  "type": "module",
-  "scripts": { "start": "tsx src/cli.ts" },
-  "dependencies": {
-    "@noble/ed25519": "^2.2.0",
-    "@noble/hashes": "^1.7.0",
-    "tsx": "^4.7.0"
-  },
-  "devDependencies": { "typescript": "^5.4.0" }
-}
-```
-
-### 5c. Key env vars
-
+### Railway (recommended)
 ```bash
-# Market server
-MARKET_URL=<PREDICT_NOW_URL>        # e.g., https://predict-now-preview-production.up.railway.app
+# Install CLI
+npm install -g @railway/cli && railway login
 
-# Firebase auth (per agent)
-FIREBASE_API_KEY=<FIREBASE_WEB_API_KEY>
-AGENT_EMAIL_1=agent1@example.com
-AGENT_PASS_1=SecurePassword123!
-AGENT_EMAIL_2=agent2@example.com
-AGENT_PASS_2=SecurePassword456!
+# Create project
+cd my-agent && railway init --name "my-agent"
 
-# Agent Canton wallet party IDs
-PARTY_ID_1=<CANTON_PARTY_ID_1>
-PARTY_ID_2=<CANTON_PARTY_ID_2>
+# Set env vars
+railway variable set MARKET_URL="<URL>" FIREBASE_API_KEY="<KEY>" \
+  AGENT_EMAIL="agent@example.com" AGENT_PASSWORD="SecurePass!"
 
-# Polling
-POLL_MS=30000                        # 30 seconds between ticks
-
-# Zoro Canton API (for deposit manager)
-ZORO_BASE_URL=<ZORO_API_URL>
-ZORO_API_KEY=<ZORO_API_KEY>
-INSTITUTIONAL_POOL_PARTY_ID=<POOL_PARTY_ID>
-INSTRUMENT_ID=CBTC
-INSTRUMENT_ADMIN=<CBTC_ADMIN>
-
-# Agent wallet keys (for CBTC deposit forwarding)
-PRIVATE_KEY_1=<BASE64_PRIVATE_KEY>
-PUBLIC_KEY_1=<BASE64_PUBLIC_KEY>
-```
-
----
-
-## Step 6: Firebase Auth in the Agent
-
-The MarketClient handles Firebase authentication automatically:
-
-```typescript
-class MarketClient {
-  private firebaseAuth?: { email: string; password: string; apiKey: string };
-  private idToken?: string;
-  private refreshToken?: string;
-  private tokenExpiresAt = 0;
-
-  setFirebaseAuth(auth: FirebaseAuth): void { this.firebaseAuth = auth; }
-
-  // Called automatically before each API request
-  private async ensureFirebaseToken(): Promise<void> {
-    if (!this.firebaseAuth) return;
-    if (this.idToken && Date.now() < this.tokenExpiresAt - 60000) return;
-
-    // Try refresh first, then full sign-in
-    // Tokens expire after 1 hour — auto-refreshed
-  }
-
-  async placeBet(partyId: string, direction: "UP" | "DOWN", amount: number) {
-    await this.ensureFirebaseToken();
-    return this.post("/api/predict", { direction, amount });
-  }
-}
-```
-
-Each agent gets its own MarketClient with its own Firebase credentials:
-```typescript
-factory.create({
-  name: "my-agent",
-  partyId: PARTY_ID_1,
-  strategy: myStrategy,
-  firebaseAuth: { email: AGENT_EMAIL_1, password: AGENT_PASS_1, apiKey: FIREBASE_API_KEY },
-});
-```
-
----
-
-## Step 7: PredictNow API Reference
-
-All endpoints at `<MARKET_URL>/api/...`
-
-### Public (no auth)
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/btc-price` | GET | Current BTC price, 24h change |
-| `/api/market/status` | GET | Active round info (number, time remaining, pool sizes) |
-| `/api/results/history?limit=20` | GET | Settled rounds with outcomes |
-| `/api/results/:roundNumber` | GET | Specific round result |
-| `/api/pool-info` | GET | Pool wallet address, fee percentage |
-
-### Authenticated (Firebase ID token)
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/predict` | POST | Place a bet: `{ direction: "UP"\|"DOWN", amount: number }` |
-| `/api/deposit` | POST | Trigger deposit detection (scans Canton for incoming CBTC) |
-| `/api/withdraw` | POST | Withdraw CBTC: `{ amount: number }` |
-| `/api/balance` | GET | Your internal CBTC balance |
-| `/api/bets` | GET | Your bet history |
-| `/api/auth/verify` | POST | Register/verify: `{ invite_code: "..." }` |
-| `/api/auth/link-party` | POST | Link Canton wallet: `{ party_id: "..." }` |
-
-### Key constraints
-- **Min bet:** 0.00001 CBTC (1000 satoshis) — may vary by server config
-- **Max bet:** 21,000,000 CBTC
-- **Rate limit:** 5 predictions per user per round (15-min cooldown window)
-- **Fee:** configurable (1% on preview, 10% default) — taken from losing pool
-- **Round duration:** ~1 minute on preview, configurable per server
-- **Withdrawal anti-fraud:** blocked if total_withdrawn > total_deposited (admin approval needed)
-
-### Payout formula (how winners get paid)
-```
-winnerShare = myBetAmount / totalWinningPoolAmount
-loserPoolAfterFee = totalLosingPool * (1 - feePercentage / 100)
-payout = myBetAmount + (loserPoolAfterFee * winnerShare)
-```
-If no losers (everyone bet the same direction), bets are refunded.
-
-### Response formats to watch for
-
-**BTC Price** — the API may return `change_24h` (snake_case) or `change24h` (camelCase) depending on the server version. Normalize in your client:
-```typescript
-async getPrice(): Promise<BTCPrice> {
-  const raw = await this.get("/api/btc-price");
-  if (raw.change_24h !== undefined) raw.change24h = raw.change_24h;
-  return raw;
-}
-```
-
----
-
-## Step 8: Deploy to Railway
-
-### 8a. Create project
-
-```bash
-cd my-agent
-railway init --name "my-trading-agent"
-```
-
-### 8b. Set env vars
-
-```bash
-railway variable set \
-  MARKET_URL="<PREDICT_NOW_URL>" \
-  FIREBASE_API_KEY="<KEY>" \
-  AGENT_EMAIL_1="agent1@example.com" \
-  AGENT_PASS_1="SecurePassword123!" \
-  PARTY_ID_1="<CANTON_PARTY_ID>" \
-  POLL_MS="30000"
-```
-
-### 8c. Deploy
-
-```bash
+# Deploy
 railway up --detach
+
+# Monitor
+railway service logs -n 30
+railway service status
 ```
 
-### 8d. Monitor
+**Railway tips:**
+- Hobby plan: $5/month, auto-restart on crash
+- `railway up` deploys from current directory (no git needed)
+- Env var changes auto-redeploy
+- Use `railway service redeploy --yes` to restart
+
+### Other options
+- **Any VPS** (DigitalOcean, Linode, etc.) — run with `pm2` or `systemd`
+- **Docker** — containerize your agent
+- **Cloud Functions** — use a cron trigger (but harder to maintain state)
+- **Your laptop** — fine for testing, not for 24/7
+
+### Env Vars Your Agent Needs
 
 ```bash
-railway service logs -n 30          # recent logs
-railway service status              # deployment status
-railway service redeploy --yes      # restart after changes
-```
+# Required
+MARKET_URL=<predict_now_url>
+FIREBASE_API_KEY=<firebase_web_api_key>
+AGENT_EMAIL=<agent_email>
+AGENT_PASSWORD=<agent_password>
 
-### Railway tips
-- **Hobby plan:** $5/month, unlimited projects, ~500 compute hours
-- **No git needed:** `railway up` deploys directly from your directory
-- **Auto-restart:** Railway restarts crashed services automatically
-- **Env var changes** trigger redeployment automatically
-- **RAILWAY_ROOT_DIRECTORY:** If deploying a subdirectory, set this env var
-- When deploying a subdirectory, run `railway up` FROM that directory
-
----
-
-## Step 9: Funding Your Agent with CBTC
-
-Agents need CBTC balance to place bets. Three approaches:
-
-### Approach A: Admin credit (simplest, for testing)
-Ask a platform admin to credit your agent's balance directly. No wallet operations needed.
-
-### Approach B: On-chain deposit
-1. Send CBTC from your wallet to the agent's Canton wallet
-2. With transfer pre-approval enabled, CBTC auto-accepts
-3. The **deposit manager** (optional component) forwards CBTC to the pool and credits internal balance
-4. Or call `POST /api/deposit` (authenticated) to trigger manual deposit detection
-
-### Approach C: Direct pool funding
-Send CBTC directly to the pool wallet, then admin-credit the agent.
-
-Admin credit endpoint (requires admin secret):
-```bash
-curl -X POST "<MARKET_URL>/admin/credit" \
-  -H "X-Admin-Secret: <ADMIN_SECRET>" \
-  -H "Content-Type: application/json" \
-  -d '{"email":"agent1@example.com","amount":0.0001,"reason":"initial funding"}'
+# Optional
+POLL_MS=30000                    # polling interval (default 30s)
+PARTY_ID=<canton_party_id>      # if using on-chain deposits/withdrawals
 ```
 
 ---
 
-## Step 10: Monitoring & Debugging
-
-### Check agent stats via logs
-Agents print stats every 5 minutes:
-```
-momentum    | 15 trades | WR: 60.0% | PnL: +0.00003 | Streak: 2
-contrarian  | 15 trades | WR: 40.0% | PnL: -0.00002 | Streak: -1
-```
-
-### Check via API
-```bash
-# Recent rounds with bets
-curl "<MARKET_URL>/api/results/history?limit=10"
-
-# Agent balance (requires auth)
-curl "<MARKET_URL>/api/balance" -H "Authorization: Bearer <TOKEN>"
-
-# Admin: view specific user
-curl "<MARKET_URL>/admin/user?email=agent1@example.com" \
-  -H "X-Admin-Secret: <ADMIN_SECRET>"
-```
-
-### Common issues
+## Part 8: Troubleshooting
 
 | Error | Cause | Fix |
 |-------|-------|-----|
-| `Invalid amount (must be 0.00001-...)` | Balance below minimum bet | Fund the agent with more CBTC |
-| `Rate limit exceeded` | Too many bets per round | Mark `lastBetRound` on failure too, not just success |
-| `No active market round` | Between rounds | Normal — agent waits for next round |
-| `Unauthorized: missing or invalid token` | Firebase token expired | Ensure `ensureFirebaseToken()` is called before API requests |
-| `lock expires before amulet` | Bad expiry date format | Use full ISO timestamp, not date-only |
-| `No input utxos found for instrument Amulet` | Wallet has no CC for gas | Fund wallet with CC (Amulet) first |
-| `AmuletTransferInstruction not found` | Stale pending transfer | Transfer may have expired — send a fresh one |
+| `Invalid amount` | Balance below min bet or bad amount | Fund agent, check min is 0.00001 |
+| `Rate limit exceeded` | >5 bets per round | Don't retry on same round — track `lastBetRound` |
+| `No active market round` | Between rounds | Normal — wait and retry |
+| `Unauthorized` | Token expired or missing | Refresh Firebase token |
+| `Invite code required` | New account, no code | Include invite_code in verify call |
+| `Canton wallet already linked` | Wallet linked to another account | Delete old account via admin, then re-link |
+| `Insufficient balance` | Not enough CBTC | Deposit or admin-credit more |
+| `Withdrawal blocked` | Anti-fraud: withdrawn > deposited | Ask admin to approve |
 
 ---
 
-## Complete Checklist
+## Quick Start Checklist
 
-- [ ] Generate Ed25519 key pair for agent wallet
-- [ ] Onboard party via Zoro API
-- [ ] Set up merge delegation + CC and CBTC pre-approvals
-- [ ] Fund wallet with CC (gas, at least 10 CC)
-- [ ] Create Firebase account for agent
-- [ ] Verify account with invite code on PredictNow
-- [ ] Link Canton wallet to Firebase account
-- [ ] Write your trading strategy
-- [ ] Set up the agent project (package.json, tsconfig, source files)
-- [ ] Test locally: `MARKET_URL=<url> npm start`
-- [ ] Deploy to Railway
-- [ ] Fund agent with CBTC (send to wallet or admin credit)
-- [ ] Monitor logs and performance
+- [ ] Get invite code and market URL from the team
+- [ ] Get Firebase API key: `GET <MARKET_URL>/api/firebase-config`
+- [ ] Create Firebase account (sign up API)
+- [ ] Verify with invite code (`POST /api/auth/verify`)
+- [ ] Get funded (admin credit or on-chain deposit)
+- [ ] Write your strategy (start with coin flip)
+- [ ] Run locally: test against the market
+- [ ] Deploy to Railway (or any host)
+- [ ] Monitor performance via logs + API
+- [ ] Iterate on your strategy
