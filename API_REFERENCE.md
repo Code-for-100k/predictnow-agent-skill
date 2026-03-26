@@ -856,23 +856,52 @@ These endpoints require a partner API key provided by the Predict Now team. Incl
 
 ### GET /api/rewards
 
-Returns platform reward and gas cost metrics for the last 30 days.
+Returns platform reward and gas cost metrics. Defaults to all pool wallets over the last 30 days.
+
+**Header:** `x-rewards-key: <YOUR_KEY>` (provided separately by the Predict Now team)
+
+**Query Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `days` | `number` | `30` | Lookback period (max 365) |
+| `wallets` | `string` | all pools | Comma-separated Canton party IDs to filter |
+
+**Request (all wallets, last 30 days):**
+
+```bash
+curl https://predictnow.cc/api/rewards \
+  -H "x-rewards-key: <YOUR_KEY>"
+```
+
+**Request (custom wallets, last 7 days):**
+
+```bash
+curl "https://predictnow.cc/api/rewards?days=7&wallets=8324e2529b::1220efd7...,394df865bf::122058ec..." \
+  -H "x-rewards-key: <YOUR_KEY>"
+```
+
+---
+
+### POST /api/rewards
+
+Same as GET but accepts a JSON body with a `wallets` array. Use this for large wallet lists or CSV-sourced data.
 
 **Request:**
 
 ```bash
-curl https://predictnow.cc/api/rewards \
-  -H "x-rewards-key: <YOUR_REWARDS_API_KEY>"
+curl -X POST https://predictnow.cc/api/rewards?days=30 \
+  -H "x-rewards-key: <YOUR_KEY>" \
+  -H "Content-Type: application/json" \
+  -d '{"wallets": ["8324e2529b::1220efd7...", "394df865bf::122058ec..."]}'
 ```
 
-**Response:**
+**Response (both GET and POST):**
 
 ```json
 {
-  "period": {
-    "start": "2026-02-24",
-    "end": "2026-03-26"
-  },
+  "period": { "start": "2026-02-24", "end": "2026-03-26", "days": 30 },
+  "wallets_queried": 4,
   "reward_per_transaction_cc": 3.449,
   "gas_cost_per_transaction_cc": 2.862,
   "net_per_transaction_cc": 0.587,
@@ -880,30 +909,45 @@ curl https://predictnow.cc/api/rewards \
   "total_gas_spent_cc": 117.3364,
   "total_transactions": 41,
   "accepted_transactions": 16,
-  "fee_percentage": 0
+  "fee_percentage": 0,
+  "daily_breakdown": [
+    {
+      "date": "2026-03-25",
+      "transfer_creation_count": 5,
+      "accepted_transfer_count": 3,
+      "total_reward": "10.347",
+      "client_reward": "4.139",
+      "reward_per_tx": "3.449"
+    }
+  ]
 }
 ```
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `period` | `object` | Date range for the metrics |
-| `reward_per_transaction_cc` | `number` | Average CC reward earned per accepted transaction |
+| `period` | `object` | Date range and day count |
+| `wallets_queried` | `number` | Number of wallets included in the query |
+| `reward_per_transaction_cc` | `number` | Average CC reward per accepted transaction |
 | `gas_cost_per_transaction_cc` | `number` | Average CC gas cost per outgoing transaction |
-| `net_per_transaction_cc` | `number` | Reward minus gas per transaction (positive = profitable) |
-| `total_cc_reward` | `number` | Total CC rewards earned in the period |
-| `total_gas_spent_cc` | `number` | Total CC spent on gas in the period |
-| `total_transactions` | `number` | Total on-chain transfer offers created |
-| `accepted_transactions` | `number` | Transfers that were explicitly accepted (earn rewards) |
+| `net_per_transaction_cc` | `number` | Reward minus gas (positive = profitable) |
+| `total_cc_reward` | `number` | Total CC rewards earned |
+| `total_gas_spent_cc` | `number` | Total CC spent on gas |
+| `total_transactions` | `number` | Total on-chain transfer offers |
+| `accepted_transactions` | `number` | Transfers explicitly accepted (earn rewards) |
 | `fee_percentage` | `number` | Current platform fee (0 = no fee) |
+| `daily_breakdown` | `array` | Per-day reward breakdown |
+
+**Rewards Dashboard:** A web UI for this endpoint is available at `/rewards.html` — authenticate with the same key.
 
 **Errors:**
 
 | Status | Body | Condition |
 |--------|------|-----------|
+| `400` | `{"error": "No valid wallet IDs..."}` | Custom wallets provided but none valid |
+| `400` | `{"error": "Maximum 100 wallets..."}` | Too many wallets |
 | `401` | `{"error": "Invalid or missing x-rewards-key header"}` | Wrong or missing API key |
-| `403` | `{"error": "Rewards API not configured"}` | Server has no REWARDS_API_KEY set |
 
-**Access:** Contact the Predict Now team to receive a `x-rewards-key`.
+**Access:** The `x-rewards-key` is shared separately — it is not included in this repo. Contact the Predict Now team.
 
 ---
 
