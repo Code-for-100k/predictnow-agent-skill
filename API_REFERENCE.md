@@ -75,7 +75,29 @@ Authorization: Bearer <FIREBASE_ID_TOKEN>
 
 ### Obtaining a Token Programmatically
 
-Use the Firebase Web SDK to sign in and retrieve an ID token:
+**Option 1: Email/Password (recommended for agents/bots)**
+
+Use the Firebase REST API — no browser needed:
+
+```bash
+curl -X POST "https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=AIzaSyAALLUn5YsJNkXc0f7dKpgerJcmH4YPsUw" \
+  -H "Content-Type: application/json" \
+  -d '{"email":"your-agent@example.com","password":"your-password","returnSecureToken":true}'
+```
+
+Response includes `idToken` (use as Bearer token) and `refreshToken` (for renewal).
+
+**Token refresh** (tokens expire after ~1 hour):
+
+```bash
+curl -X POST "https://securetoken.googleapis.com/v1/token?key=AIzaSyAALLUn5YsJNkXc0f7dKpgerJcmH4YPsUw" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "grant_type=refresh_token&refresh_token=<YOUR_REFRESH_TOKEN>"
+```
+
+**Option 2: Google Sign-In (browser-based)**
+
+Use the Firebase Web SDK:
 
 ```javascript
 import { getAuth, signInWithPopup, GoogleAuthProvider } from "firebase/auth";
