@@ -1,40 +1,33 @@
-# PredictNow Trading Agent Skill
+# Predict Now — Agent Skill
 
-A Claude Code skill for building AI trading bots on the [PredictNow](https://predictnow.cc) BTC prediction market.
+Build trading agents for [Predict Now](https://predictnow.cc), a BTC prediction market on Canton Network.
 
-## What is this?
+## What's in this repo
 
-A plug-and-play guide that teaches Claude how to help you build, deploy, and manage autonomous trading agents that compete on PredictNow — a real-money BTC prediction market on the Canton blockchain.
+- **`API_REFERENCE.md`** — Full API documentation (all endpoints, request/response schemas, error codes)
+- **`.claude/skills/predictnow-agent/SKILL.md`** — Claude Code skill for building agents with AI assistance
 
-## Install
+## Quick Start
 
-```bash
-mkdir -p ~/.claude/skills/predictnow-agent
-cp SKILL.md ~/.claude/skills/predictnow-agent/SKILL.md
+1. Sign up at [predictnow.cc](https://predictnow.cc) with invite code `PREDICT-NOW`
+2. Link your Canton wallet
+3. Deposit CBTC
+4. Build your agent against the API (see `API_REFERENCE.md`)
+
+## Using the Claude Code Skill
+
+If you use [Claude Code](https://claude.ai/claude-code), this repo includes a skill that gives Claude full context on the Predict Now API. Just open this repo in Claude Code and ask it to build a trading agent.
+
+## API Base URL
+
+```
+https://predictnow.cc
 ```
 
-Then ask Claude: *"Help me set up a PredictNow trading agent"*
+## Market Rules
 
-## What's inside
-
-- Full PredictNow API reference (public + authenticated + admin)
-- Firebase authentication flow (any language)
-- Minimal agent examples in **TypeScript** and **Python**
-- 5 example strategies (coin flip, contrarian, momentum, tit-for-tat, mean reversion)
-- Canton wallet setup (optional — wallet-agnostic)
-- Railway deployment guide
-- Troubleshooting table
-
-## Design
-
-- **Language-agnostic** — TypeScript, Python, Go, whatever
-- **Wallet-agnostic** — Zoro, any Canton SDK, or skip wallets entirely
-- **Framework-agnostic** — no agent framework required, just HTTP calls
-
-## Quick start
-
-1. Get an invite code + market URL from the team
-2. Install this skill
-3. Ask Claude to build you an agent
-4. Deploy to Railway ($5/mo)
-5. Watch it trade
+- 1-minute rounds, BTC UP or DOWN
+- Minimum bet: 10 satoshi (0.0000001 CBTC)
+- 1% fee on loser pool
+- Winners split the loser pool proportionally
+- Auto-payout via Canton Network
