@@ -21,15 +21,13 @@ Build autonomous trading bots on the PredictNow BTC prediction market. Bet UP or
 2. Agent polls market status every N seconds
 3. When a round is active, agent decides UP or DOWN
 4. Agent places a bet via POST /api/predict
-5. Round settles → winners split the losers' pool (minus fee)
+5. Round settles → winners split the losers' pool proportionally
 6. Repeat
 ```
 
-**Payout formula:**
+**Payout formula (fee = 0%):**
 ```
-winnerShare = myBet / totalWinningPool
-loserPoolAfterFee = totalLosingPool * (1 - fee%)
-payout = myBet + (loserPoolAfterFee * winnerShare)
+payout = your_bet + (your_bet / winner_pool) * loser_pool
 ```
 If everyone bet the same direction → bets refunded (no losers).
 
@@ -42,8 +40,8 @@ This is the only thing your agent MUST interact with. Everything else is optiona
 ### Base URL
 
 Get the current market URL from the team. Examples:
-- Preview: `https://predict-now-preview-production.up.railway.app`
-- Production: ask the team
+- Production: `https://predictnow.cc`
+- Direct: `https://btc-prediction-market-production.up.railway.app`
 
 ### 1.1 Public Endpoints (no auth needed)
 
@@ -68,7 +66,7 @@ Note: field may be `change_24h` or `change24h` depending on server version. Hand
   "down_predictions": 1,
   "up_amount": 0.00002,
   "down_amount": 0.00001,
-  "fee_percentage": 1
+  "fee_percentage": 0
 }
 
 // Between rounds:
@@ -86,7 +84,7 @@ Note: field may be `change_24h` or `change24h` depending on server version. Hand
       "winning_direction": "UP",
       "total_up_amount": 0.00003,
       "total_down_amount": 0.00001,
-      "fee_collected": 0.0000001,
+      "fee_collected": 0,
       "window_start_time": 1774431400000,
       "window_end_time": 1774431460000
     }
@@ -192,13 +190,49 @@ Require header: `X-Admin-Secret: <ADMIN_SECRET>`
 
 | Constraint | Value |
 |------------|-------|
-| Min bet | 0.00001 CBTC (1000 satoshis) |
+| Min bet | 0.0000001 CBTC (10 satoshis) |
 | Max bet | 21,000,000 CBTC |
 | Rate limit | 5 predictions per user per round |
 | Rate limit cooldown | 15 minutes |
-| Fee | Configurable (1-10% of losing pool) |
+| Fee | 0% (no platform fee) |
 | Party ID format | Contains `::`, 20-300 chars |
 | Withdrawal anti-fraud | Blocked if withdrawn > deposited |
+
+### 1.5 Circuit Breaker
+
+The platform monitors on-chain gas costs vs. Canton network rewards. When gas costs exceed reward income, the circuit breaker trips:
+
+- **Auto-payouts pause** — winnings are credited to the internal ledger but not sent on-chain
+- **Server-side agents stop** — built-in trading agents are paused
+- **Manual withdrawals still work** — `POST /api/withdraw` always works
+- **Auto-recovers** — resets automatically when margins improve
+
+**Check circuit breaker state** (poll every 30s, pause trading if tripped):
+
+```javascript
+const rewards = await fetch("https://predictnow.cc/api/rewards", {
+  headers: { "x-rewards-key": REWARDS_KEY },
+}).then(r => r.json());
+
+if (rewards.circuit_breaker.tripped) {
+  console.log("Circuit breaker active — auto-payouts paused");
+  // Winnings are safe in internal ledger. Use POST /api/withdraw to claim.
+}
+```
+
+The `circuit_breaker` object in the rewards response:
+```json
+{
+  "tripped": false,
+  "tripped_at": null,
+  "reason": "",
+  "avg_reward": 3.45,
+  "avg_gas": 2.86,
+  "net_margin": 0.59
+}
+```
+
+See `examples/` directory for a complete agent implementation with circuit breaker handling.
 
 ---
 
