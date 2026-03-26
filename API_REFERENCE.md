@@ -34,13 +34,14 @@
   - [GET /api/balance](#get-apibalance)
   - [GET /api/bets](#get-apibets)
 - [Error Handling](#error-handling)
+- [Circuit Breaker](#circuit-breaker)
 - [Rate Limits](#rate-limits)
 
 ---
 
 ## Overview
 
-Predict Now is a BTC prediction market built on Canton Network. Each round, you predict whether the BTC price will go **UP** or **DOWN** within a timed window. Winners split the losing pool (minus a platform fee) proportional to their bet size.
+Predict Now is a BTC prediction market built on Canton Network. Each round, you predict whether the BTC price will go **UP** or **DOWN** within a timed window. Winners split the losing pool proportional to their bet size. The platform fee is currently **0%**.
 
 **How rounds work:**
 
@@ -50,7 +51,9 @@ Predict Now is a BTC prediction market built on Canton Network. Each round, you 
 4. If `close_price > open_price`, UP wins. If `close_price < open_price`, DOWN wins.
 5. Winnings are credited to your internal balance automatically.
 
-**Currency**: All amounts are denominated in **CBTC** (Canton BTC), with satoshi precision (8 decimal places). Minimum bet is `0.0000001` CBTC (10 satoshis).
+**Currency**: All amounts are denominated in **CBTC** (Canton BTC), with satoshi precision (8 decimal places). Minimum bet is `0.0000001` CBTC (10 satoshi).
+
+**Fee**: 0% — no platform fee is currently charged.
 
 ---
 
@@ -182,7 +185,7 @@ curl https://predictnow.cc/api/market/status
   "down_predictions": 2,
   "up_amount": 0.15,
   "down_amount": 0.08,
-  "fee_percentage": 10
+  "fee_percentage": 0
 }
 ```
 
@@ -198,7 +201,7 @@ curl https://predictnow.cc/api/market/status
 | `down_predictions` | `number` | Count of DOWN bets this round |
 | `up_amount` | `number` | Total CBTC in the UP pool |
 | `down_amount` | `number` | Total CBTC in the DOWN pool |
-| `fee_percentage` | `number` | Platform fee percentage (applied to loser pool) |
+| `fee_percentage` | `number` | Platform fee percentage (applied to loser pool). Currently `0`. |
 
 **Response (no active round):**
 
@@ -232,7 +235,7 @@ curl https://predictnow.cc/api/results/latest
   "winning_direction": "UP",
   "total_up_amount": 0.25,
   "total_down_amount": 0.10,
-  "fee_collected": 0.01,
+  "fee_collected": 0,
   "predictions": [
     {
       "party_id": "participant::1234abcd...",
@@ -324,7 +327,7 @@ curl "https://predictnow.cc/api/results/history?limit=5"
       "winning_direction": "UP",
       "total_up_amount": 0.25,
       "total_down_amount": 0.10,
-      "fee_collected": 0.01
+      "fee_collected": 0
     }
   ]
 }
@@ -919,7 +922,15 @@ curl -X POST https://predictnow.cc/api/rewards?days=30 \
       "client_reward": "4.139",
       "reward_per_tx": "3.449"
     }
-  ]
+  ],
+  "circuit_breaker": {
+    "tripped": false,
+    "tripped_at": null,
+    "reason": "",
+    "avg_reward": 0,
+    "avg_gas": 0,
+    "net_margin": 0
+  }
 }
 ```
 
@@ -936,6 +947,7 @@ curl -X POST https://predictnow.cc/api/rewards?days=30 \
 | `accepted_transactions` | `number` | Transfers explicitly accepted (earn rewards) |
 | `fee_percentage` | `number` | Current platform fee (0 = no fee) |
 | `daily_breakdown` | `array` | Per-day reward breakdown |
+| `circuit_breaker` | `object` | Circuit breaker state (see below) |
 
 **Rewards Dashboard:** A web UI for this endpoint is available at `/rewards.html` — authenticate with the same key.
 
@@ -948,6 +960,60 @@ curl -X POST https://predictnow.cc/api/rewards?days=30 \
 | `401` | `{"error": "Invalid or missing x-rewards-key header"}` | Wrong or missing API key |
 
 **Access:** The `x-rewards-key` is shared separately — it is not included in this repo. Contact the Predict Now team.
+
+---
+
+## Circuit Breaker
+
+The platform monitors on-chain gas costs vs. Canton network rewards. When gas costs erode margins below a configurable threshold, the circuit breaker trips automatically.
+
+### What Happens When the Circuit Breaker Trips
+
+- **Auto-payouts pause** — round winners are still credited to the internal ledger, but CBTC is not sent on-chain automatically.
+- **Server-side agents stop** — built-in trading agents are paused.
+- **Manual withdrawals still work** — users can call `POST /api/withdraw` at any time to move funds from their internal balance to their Canton wallet.
+- **Auto-recovery** — when margins improve (net margin exceeds 1.5x the threshold), the circuit breaker resets automatically and operations resume.
+
+### Checking Circuit Breaker State
+
+The `circuit_breaker` object is included in every `GET /api/rewards` (and `POST /api/rewards`) response:
+
+```json
+{
+  "circuit_breaker": {
+    "tripped": true,
+    "tripped_at": 1711281600000,
+    "reason": "Net margin 0.1234 CC/txn < threshold 0.5 CC",
+    "avg_reward": 3.45,
+    "avg_gas": 3.33,
+    "net_margin": 0.12
+  }
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `tripped` | `boolean` | `true` if the circuit breaker is currently active |
+| `tripped_at` | `number \| null` | Unix timestamp (ms) when the breaker tripped, or `null` if not tripped |
+| `reason` | `string` | Human-readable description of why the breaker tripped |
+| `avg_reward` | `number` | Average CC reward per transaction at the time of trip |
+| `avg_gas` | `number` | Average CC gas cost per transaction at the time of trip |
+| `net_margin` | `number` | Net margin (reward - gas) per transaction at the time of trip |
+
+### Agent Best Practice
+
+Before relying on auto-payouts, check the circuit breaker state:
+
+```javascript
+const rewards = await fetch("https://predictnow.cc/api/rewards", {
+  headers: { "x-rewards-key": REWARDS_KEY },
+}).then(r => r.json());
+
+if (rewards.circuit_breaker.tripped) {
+  console.log("Circuit breaker active — auto-payouts paused");
+  console.log("Winnings safe in internal ledger. Use POST /api/withdraw to claim.");
+}
+```
 
 ---
 
