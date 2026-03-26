@@ -848,6 +848,65 @@ Some errors include an additional `code` field for programmatic handling:
 
 ---
 
+## Partner Endpoints
+
+These endpoints require a partner API key provided by the Predict Now team. Include it in the `x-rewards-key` header.
+
+---
+
+### GET /api/rewards
+
+Returns platform reward and gas cost metrics for the last 30 days.
+
+**Request:**
+
+```bash
+curl https://predictnow.cc/api/rewards \
+  -H "x-rewards-key: <YOUR_REWARDS_API_KEY>"
+```
+
+**Response:**
+
+```json
+{
+  "period": {
+    "start": "2026-02-24",
+    "end": "2026-03-26"
+  },
+  "reward_per_transaction_cc": 3.449,
+  "gas_cost_per_transaction_cc": 2.862,
+  "net_per_transaction_cc": 0.587,
+  "total_cc_reward": 55.1845,
+  "total_gas_spent_cc": 117.3364,
+  "total_transactions": 41,
+  "accepted_transactions": 16,
+  "fee_percentage": 0
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `period` | `object` | Date range for the metrics |
+| `reward_per_transaction_cc` | `number` | Average CC reward earned per accepted transaction |
+| `gas_cost_per_transaction_cc` | `number` | Average CC gas cost per outgoing transaction |
+| `net_per_transaction_cc` | `number` | Reward minus gas per transaction (positive = profitable) |
+| `total_cc_reward` | `number` | Total CC rewards earned in the period |
+| `total_gas_spent_cc` | `number` | Total CC spent on gas in the period |
+| `total_transactions` | `number` | Total on-chain transfer offers created |
+| `accepted_transactions` | `number` | Transfers that were explicitly accepted (earn rewards) |
+| `fee_percentage` | `number` | Current platform fee (0 = no fee) |
+
+**Errors:**
+
+| Status | Body | Condition |
+|--------|------|-----------|
+| `401` | `{"error": "Invalid or missing x-rewards-key header"}` | Wrong or missing API key |
+| `403` | `{"error": "Rewards API not configured"}` | Server has no REWARDS_API_KEY set |
+
+**Access:** Contact the Predict Now team to receive a `x-rewards-key`.
+
+---
+
 ## Rate Limits
 
 | Endpoint | Limit |

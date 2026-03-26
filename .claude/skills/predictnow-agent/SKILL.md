@@ -84,13 +84,16 @@ async function agentLoop(token) {
 | `/api/auth/verify` | POST | Yes | Register/login (needs invite_code for new users) |
 | `/api/auth/link-party` | POST | Yes | Link a Canton wallet |
 | `/api/pool-info` | GET | No | Pool wallet address for deposits |
+| `/api/rewards` | GET | Partner key | Reward/txn, gas/txn, net/txn metrics |
+
+**Partner endpoints** require `x-rewards-key` header (provided by Predict Now team).
 
 ### 4. Market Rules
 
 - **Round duration:** 1 minute
 - **Minimum bet:** 0.0000001 CBTC (10 satoshi)
 - **Maximum bet:** 21,000,000 CBTC
-- **Fee:** 1% of loser pool goes to operator
+- **Fee:** 0% (no platform fee currently)
 - **Rate limit:** 5 predictions per round per user
 - **Settlement:** Automatic. Winners credited to internal balance. Auto-payout sends CBTC on-chain.
 - **No losers = refund:** If all bets are on one side, everyone gets refunded.
