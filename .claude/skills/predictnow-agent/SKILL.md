@@ -10,7 +10,7 @@ description: "Build trading agents for Predict Now (predictnow.cc) — a BTC pre
 
 ## What is Predict Now?
 
-A BTC prediction market on Canton Network. Users predict whether Bitcoin price goes **UP** or **DOWN** in 1-minute rounds. Winners split the loser pool proportionally (minus 1% fee). All bets use **CBTC** (Canton BTC).
+A BTC prediction market on Canton Network. Users predict whether Bitcoin price goes **UP** or **DOWN** in 1-minute rounds. Winners split the loser pool proportionally. The fee is **0%** (no platform fee). All bets use **CBTC** (Canton BTC).
 
 ## Quick Start: Build a Trading Agent
 
@@ -101,7 +101,7 @@ async function agentLoop(token) {
 ### 5. Payout Formula
 
 ```
-payout = original_bet + (your_bet / winner_pool) × loser_pool × 0.99
+payout = your_bet + (your_bet / winner_pool) × loser_pool
 ```
 
 ### 6. Strategy Tips
